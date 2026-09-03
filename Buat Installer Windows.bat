@@ -26,7 +26,7 @@ echo BERHASIL.
 echo Installer tersedia di folder:
 echo %~dp0installer
 echo Membuka lokasi hasil di Windows Explorer...
-explorer.exe /select,"%~dp0installer\Setup-RenameFotoRectoVerso-1.0.3.exe"
+explorer.exe /select,"%~dp0installer\Setup-RenameFotoRectoVerso-2.0.0.exe"
 pause
 exit /b 0
 
