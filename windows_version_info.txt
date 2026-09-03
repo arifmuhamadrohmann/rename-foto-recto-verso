@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 3, 0),
-    prodvers=(1, 0, 3, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,7 +17,7 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Aip'),
             StringStruct(u'FileDescription', u'Rename Foto RECTO VERSO'),
-            StringStruct(u'FileVersion', u'1.0.3.0'),
+            StringStruct(u'FileVersion', u'2.0.0.0'),
             StringStruct(u'InternalName', u'RenameFotoRectoVerso'),
             StringStruct(
               u'LegalCopyright',
@@ -25,7 +25,7 @@ VSVersionInfo(
             ),
             StringStruct(u'OriginalFilename', u'RenameFotoRectoVerso.exe'),
             StringStruct(u'ProductName', u'Rename Foto RECTO VERSO'),
-            StringStruct(u'ProductVersion', u'1.0.3')
+            StringStruct(u'ProductVersion', u'2.0.0')
           ]
         )
       ]
