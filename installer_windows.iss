@@ -1,5 +1,5 @@
 #define MyAppName "Rename Foto RECTO VERSO"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Aip - arif.muhamadrohman@gmail.com"
 #define MyAppExeName "RenameFotoRectoVerso.exe"
 
@@ -22,8 +22,8 @@ VersionInfoCompany=Aip
 VersionInfoCopyright=Copyright © 2026 Aip - arif.muhamadrohman@gmail.com
 VersionInfoDescription=Installer Rename Foto RECTO VERSO
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=1.0.3
-VersionInfoVersion=1.0.3.0
+VersionInfoProductVersion=2.0.0
+VersionInfoVersion=2.0.0.0
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
