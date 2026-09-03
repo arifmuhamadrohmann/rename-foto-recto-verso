@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tambahkan penanda R/V pada nama berkas hasil digitalisasi.
+"""Sortir dan pindahkan foto digitalisasi RECTO, VERSO, dan IDENTITY.
 
 Copyright © 2026 Aip - arif.muhamadrohman@gmail.com
 """
@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
 
-VERSION = "1.0.3"
+VERSION = "2.0.0"
 AUTHOR = "Aip"
 AUTHOR_EMAIL = "arif.muhamadrohman@gmail.com"
 COPYRIGHT = f"Copyright © 2026 {AUTHOR} - {AUTHOR_EMAIL}"
@@ -39,10 +40,11 @@ PHOTO_EXTENSIONS = {
 
 
 @dataclass(frozen=True)
-class RenameItem:
+class MoveItem:
     side: str
+    file_type: str
     source: Path
-    destination: Path | None
+    destination: Path
     state: str
     detail: str
     code: str
@@ -50,21 +52,18 @@ class RenameItem:
 
     @property
     def ready(self) -> bool:
-        return self.state == "ready" and self.destination is not None
+        return self.state == "ready"
 
 
 @dataclass(frozen=True)
 class Analysis:
-    items: tuple[RenameItem, ...]
+    items: tuple[MoveItem, ...]
     ignored_count: int
+    output_root: Path
 
     @property
     def ready_count(self) -> int:
         return sum(item.ready for item in self.items)
-
-    @property
-    def already_count(self) -> int:
-        return sum(item.state == "already" for item in self.items)
 
     @property
     def conflict_count(self) -> int:
@@ -72,7 +71,14 @@ class Analysis:
 
     @property
     def unpaired_count(self) -> int:
-        return sum(not item.has_pair for item in self.items)
+        return sum(
+            item.side in {"RECTO", "VERSO"} and not item.has_pair
+            for item in self.items
+        )
+
+    @property
+    def output_folder_count(self) -> int:
+        return len({item.destination.parent for item in self.items if item.ready})
 
 
 def _path_key(path: Path) -> str:
@@ -80,10 +86,11 @@ def _path_key(path: Path) -> str:
     return os.path.abspath(os.fspath(path)).casefold()
 
 
-def _same_existing_file(first: Path, second: Path) -> bool:
+def _is_within(path: Path, parent: Path) -> bool:
     try:
-        return first.exists() and second.exists() and os.path.samefile(first, second)
-    except OSError:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
         return False
 
 
@@ -95,56 +102,69 @@ def _iter_files(folder: Path, recursive: bool) -> Iterable[Path]:
     )
 
 
+def _format_group(path: Path) -> str:
+    extension = path.suffix.casefold()
+    if extension in {".jpg", ".jpeg"}:
+        return "JPG"
+    if extension:
+        return extension[1:].upper()
+    return "TANPA EKSTENSI"
+
+
+def _new_name(stem: str, extension: str, marker: str) -> tuple[str, str, str]:
+    """Kembalikan nama baru, kode dasar, dan keterangan perubahan."""
+    if not marker:  # IDENTITY: nama wajib tetap seperti sumber.
+        return f"{stem}{extension}", stem, "Nama IDENTITY tetap"
+
+    if stem.endswith(marker):
+        return f"{stem}{extension}", stem[: -len(marker)], "Penanda sudah sesuai"
+
+    if stem.casefold().endswith(marker.casefold()):
+        code = stem[: -len(marker)]
+        return (
+            f"{code}{marker}{extension}",
+            code,
+            "Ubah penanda menjadi huruf kecil",
+        )
+
+    return f"{stem}{marker}{extension}", stem, f"Tambahkan penanda {marker}"
+
+
 def _analyze_one_folder(
     folder: Path,
     side: str,
     marker: str,
+    output_root: Path,
     recursive: bool,
     all_files: bool,
-) -> tuple[list[RenameItem], int]:
-    items: list[RenameItem] = []
+) -> tuple[list[MoveItem], int]:
+    items: list[MoveItem] = []
     ignored = 0
-    marker_folded = marker.casefold()
 
     for source in _iter_files(folder, recursive):
         if not all_files and source.suffix.casefold() not in PHOTO_EXTENSIONS:
             ignored += 1
             continue
 
-        stem = source.stem
-        already_marked = bool(marker) and stem.endswith(marker)
-        different_case = (
-            bool(marker)
-            and not already_marked
-            and stem.casefold().endswith(marker_folded)
-        )
-        code = stem[: -len(marker)] if already_marked or different_case else stem
+        file_type = _format_group(source)
+        destination_folder = output_root / f"{side} {file_type}"
+        new_name, code, change_detail = _new_name(source.stem, source.suffix, marker)
+        destination = destination_folder / new_name
 
-        if already_marked:
-            items.append(
-                RenameItem(
-                    side=side,
-                    source=source,
-                    destination=None,
-                    state="already",
-                    detail=f"Sudah berakhiran {marker}",
-                    code=code,
-                )
-            )
-            continue
-
-        new_stem = f"{code}{marker}" if different_case else f"{stem}{marker}"
-        destination = source.with_name(f"{new_stem}{source.suffix}")
-        if destination.exists() and not _same_existing_file(source, destination):
+        if _path_key(source) == _path_key(destination):
             state = "conflict"
-            detail = f"Tujuan sudah ada: {destination.name}"
+            detail = "Folder sumber dan tujuan sama"
+        elif destination.exists():
+            state = "conflict"
+            detail = f"Tujuan sudah ada: {destination}"
         else:
             state = "ready"
-            detail = "Ubah penanda menjadi huruf kecil" if different_case else "Siap"
+            detail = f"{change_detail}; pindahkan ke {destination_folder.name}"
 
         items.append(
-            RenameItem(
+            MoveItem(
                 side=side,
+                file_type=file_type,
                 source=source,
                 destination=destination,
                 state=state,
@@ -159,6 +179,8 @@ def _analyze_one_folder(
 def analyze(
     recto: Path,
     verso: Path,
+    identity: Path,
+    output: Path,
     *,
     recursive: bool = False,
     all_files: bool = False,
@@ -168,126 +190,154 @@ def analyze(
     if any(value in separator for value in separators):
         raise ValueError("Pemisah tidak boleh mengandung tanda pemisah folder.")
 
-    recto = recto.expanduser().resolve()
-    verso = verso.expanduser().resolve()
+    source_folders = {
+        "RECTO": recto.expanduser().resolve(),
+        "VERSO": verso.expanduser().resolve(),
+        "IDENTITY": identity.expanduser().resolve(),
+    }
+    output_root = output.expanduser().resolve()
 
-    for label, folder in (("RECTO", recto), ("VERSO", verso)):
+    for label, folder in source_folders.items():
         if not folder.exists():
             raise ValueError(f"Folder {label} tidak ditemukan: {folder}")
         if not folder.is_dir():
             raise ValueError(f"Lokasi {label} bukan folder: {folder}")
 
-    if _path_key(recto) == _path_key(verso):
-        raise ValueError("Folder RECTO dan VERSO harus berbeda.")
+    source_keys = {_path_key(folder) for folder in source_folders.values()}
+    if len(source_keys) != len(source_folders):
+        raise ValueError("Folder RECTO, VERSO, dan IDENTITY harus berbeda.")
 
-    recto_items, recto_ignored = _analyze_one_folder(
-        recto, "RECTO", f"{separator}r", recursive, all_files
-    )
-    verso_items, verso_ignored = _analyze_one_folder(
-        verso, "VERSO", f"{separator}v", recursive, all_files
-    )
-    items = recto_items + verso_items
+    for label, folder in source_folders.items():
+        if _is_within(output_root, folder):
+            raise ValueError(
+                f"Folder hasil tidak boleh berada di dalam folder sumber {label}."
+            )
 
-    # Tandai kode yang memiliki pasangan pada sisi seberangnya. Perbedaan
-    # ekstensi tidak menjadi masalah selama kode nama berkas sama.
-    recto_codes = {item.code.casefold() for item in recto_items}
-    verso_codes = {item.code.casefold() for item in verso_items}
+    specs = (
+        ("RECTO", f"{separator}r"),
+        ("VERSO", f"{separator}v"),
+        ("IDENTITY", ""),
+    )
+    items: list[MoveItem] = []
+    ignored_count = 0
+    side_items: dict[str, list[MoveItem]] = {}
+
+    for side, marker in specs:
+        found, ignored = _analyze_one_folder(
+            source_folders[side],
+            side,
+            marker,
+            output_root,
+            recursive,
+            all_files,
+        )
+        side_items[side] = found
+        items.extend(found)
+        ignored_count += ignored
+
+    recto_codes = {item.code.casefold() for item in side_items["RECTO"]}
+    verso_codes = {item.code.casefold() for item in side_items["VERSO"]}
     paired_items = [
         replace(
             item,
             has_pair=(
-                item.code.casefold() in (verso_codes if item.side == "RECTO" else recto_codes)
+                True
+                if item.side == "IDENTITY"
+                else item.code.casefold()
+                in (verso_codes if item.side == "RECTO" else recto_codes)
             ),
         )
         for item in items
     ]
 
-    # Pemeriksaan tambahan apabila dua rencana secara tidak sengaja menuju
-    # path yang sama.
     destination_counts: dict[str, int] = {}
     for item in paired_items:
-        if item.destination is not None:
-            key = _path_key(item.destination)
-            destination_counts[key] = destination_counts.get(key, 0) + 1
+        key = _path_key(item.destination)
+        destination_counts[key] = destination_counts.get(key, 0) + 1
 
-    final_items: list[RenameItem] = []
+    final_items: list[MoveItem] = []
     for item in paired_items:
-        if (
-            item.destination is not None
-            and destination_counts[_path_key(item.destination)] > 1
-        ):
+        if destination_counts[_path_key(item.destination)] > 1:
             final_items.append(
                 replace(item, state="conflict", detail="Dua file menuju nama yang sama")
             )
         else:
             final_items.append(item)
 
-    return Analysis(tuple(final_items), recto_ignored + verso_ignored)
+    return Analysis(tuple(final_items), ignored_count, output_root)
 
 
 def execute(analysis: Analysis) -> list[tuple[Path, Path]]:
-    """Jalankan rencana; batalkan perubahan yang sudah terjadi jika ada kegagalan."""
+    """Pindahkan rencana; kembalikan file yang sudah berpindah jika terjadi gagal."""
     ready_items = [item for item in analysis.items if item.ready]
 
     for item in ready_items:
-        assert item.destination is not None
         if not item.source.exists():
             raise RuntimeError(f"File sumber sudah tidak ada: {item.source}")
-        if item.destination.exists() and not _same_existing_file(
-            item.source, item.destination
-        ):
+        if item.destination.exists():
             raise RuntimeError(f"Nama tujuan muncul setelah analisis: {item.destination}")
 
     completed: list[tuple[Path, Path]] = []
+    created_folders: set[Path] = set()
     try:
         for item in ready_items:
-            assert item.destination is not None
-            if _same_existing_file(item.source, item.destination):
-                item.source.replace(item.destination)
-            else:
-                item.source.rename(item.destination)
+            if not item.destination.parent.exists():
+                item.destination.parent.mkdir(parents=True, exist_ok=True)
+                created_folders.add(item.destination.parent)
+            shutil.move(os.fspath(item.source), os.fspath(item.destination))
             completed.append((item.source, item.destination))
     except Exception as exc:
         rollback_errors: list[str] = []
         for source, destination in reversed(completed):
             try:
-                if destination.exists() and (
-                    not source.exists() or _same_existing_file(source, destination)
-                ):
-                    destination.replace(source)
+                if destination.exists() and not source.exists():
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(os.fspath(destination), os.fspath(source))
                 elif destination.exists() and source.exists():
                     rollback_errors.append(f"Nama sumber sudah dipakai: {source}")
             except Exception as rollback_exc:  # pragma: no cover - sangat jarang
                 rollback_errors.append(str(rollback_exc))
+
+        for folder in sorted(created_folders, key=lambda value: len(value.parts), reverse=True):
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+
         extra = ""
         if rollback_errors:
             extra = " Rollback tidak lengkap: " + "; ".join(rollback_errors)
-        raise RuntimeError(f"Rename gagal: {exc}.{extra}") from exc
+        raise RuntimeError(f"Pemindahan gagal: {exc}.{extra}") from exc
 
     return completed
 
 
-def _status_text(item: RenameItem) -> str:
-    labels = {
-        "ready": "SIAP",
-        "already": "SUDAH",
-        "conflict": "KONFLIK",
-    }
-    pair = "pasangan ada" if item.has_pair else "tanpa pasangan"
-    return f"{labels[item.state]} - {item.detail}; {pair}"
+def _status_text(item: MoveItem) -> str:
+    labels = {"ready": "SIAP", "conflict": "KONFLIK"}
+    if item.side == "IDENTITY":
+        note = "nama asli dipertahankan"
+    else:
+        note = "pasangan ada" if item.has_pair else "tanpa pasangan"
+    return f"{labels[item.state]} - {item.detail}; {note}"
 
 
 def _print_analysis(analysis: Analysis) -> None:
-    print("SISI\tNAMA LAMA\tNAMA BARU\tSTATUS")
+    print("SISI\tFORMAT\tNAMA SUMBER\tTUJUAN\tSTATUS")
     for item in analysis.items:
-        new_name = item.destination.name if item.destination else "-"
-        print(f"{item.side}\t{item.source.name}\t{new_name}\t{_status_text(item)}")
+        try:
+            destination = item.destination.relative_to(analysis.output_root)
+        except ValueError:
+            destination = item.destination
+        print(
+            f"{item.side}\t{item.file_type}\t{item.source.name}\t"
+            f"{destination}\t{_status_text(item)}"
+        )
     print(
         "\nRingkasan: "
-        f"{analysis.ready_count} siap, "
-        f"{analysis.already_count} sudah sesuai, "
+        f"{analysis.ready_count} siap dipindahkan, "
+        f"{analysis.output_folder_count} folder hasil, "
         f"{analysis.conflict_count} konflik, "
-        f"{analysis.unpaired_count} tanpa pasangan, "
+        f"{analysis.unpaired_count} RECTO/VERSO tanpa pasangan, "
         f"{analysis.ignored_count} file nonfoto diabaikan."
     )
 
@@ -298,53 +348,59 @@ def run_gui() -> int:
         from tkinter import filedialog, messagebox, ttk
     except ImportError:
         print(
-            "Tkinter tidak tersedia. Jalankan dengan --recto dan --verso melalui terminal.",
+            "Tkinter tidak tersedia. Gunakan --recto, --verso, --identity, "
+            "dan --output melalui terminal.",
             file=sys.stderr,
         )
         return 2
 
-    class RenameApp:
+    class SortPhotoApp:
         def __init__(self, root: "tk.Tk") -> None:
             self.root = root
-            self.root.title("Rename Foto RECTO / VERSO")
-            self.root.minsize(820, 560)
+            self.root.title("Sortir Foto RECTO / VERSO / IDENTITY")
+            self.root.minsize(980, 650)
             self.analysis: Analysis | None = None
 
             self.recto_var = tk.StringVar()
             self.verso_var = tk.StringVar()
+            self.identity_var = tk.StringVar()
+            self.output_var = tk.StringVar()
             self.separator_var = tk.StringVar()
             self.recursive_var = tk.BooleanVar(value=False)
             self.all_files_var = tk.BooleanVar(value=False)
             self.summary_var = tk.StringVar(
-                value="Pilih folder RECTO dan VERSO, lalu klik Analisis."
+                value="Pilih tiga folder sumber dan satu folder hasil."
             )
 
             outer = ttk.Frame(root, padding=14)
             outer.pack(fill="both", expand=True)
             outer.columnconfigure(1, weight=1)
-            outer.rowconfigure(7, weight=1)
+            outer.rowconfigure(9, weight=1)
 
             ttk.Label(
                 outer,
-                text="Penambah Akhiran Foto Digitalisasi",
+                text="Sortir Foto Digitalisasi",
                 font=("TkDefaultFont", 15, "bold"),
             ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
             self._folder_row(outer, 1, "Folder RECTO", self.recto_var)
             self._folder_row(outer, 2, "Folder VERSO", self.verso_var)
+            self._folder_row(outer, 3, "Folder IDENTITY", self.identity_var)
+            self._folder_row(outer, 4, "Folder HASIL", self.output_var)
 
-            ttk.Label(outer, text="Pemisah (opsional)").grid(
-                row=3, column=0, sticky="w", padx=(0, 8), pady=4
+            ttk.Label(outer, text="Pemisah r/v (opsional)").grid(
+                row=5, column=0, sticky="w", padx=(0, 8), pady=4
             )
             ttk.Entry(outer, textvariable=self.separator_var, width=8).grid(
-                row=3, column=1, sticky="w", pady=4
+                row=5, column=1, sticky="w", pady=4
             )
-            ttk.Label(outer, text="Kosong: KODE1r.jpg  •  Isi _: KODE1_r.jpg").grid(
-                row=3, column=1, sticky="w", padx=(80, 0), pady=4
-            )
+            ttk.Label(
+                outer,
+                text="Kosong: KODE1r.jpg  •  Isi _: KODE1_r.jpg  •  IDENTITY tetap",
+            ).grid(row=5, column=1, sticky="w", padx=(80, 0), pady=4)
 
             options = ttk.Frame(outer)
-            options.grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 8))
+            options.grid(row=6, column=0, columnspan=3, sticky="w", pady=(5, 8))
             ttk.Checkbutton(
                 options,
                 text="Sertakan subfolder",
@@ -357,36 +413,43 @@ def run_gui() -> int:
             ).pack(side="left")
 
             buttons = ttk.Frame(outer)
-            buttons.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            buttons.grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 8))
             ttk.Button(buttons, text="Analisis & Pratinjau", command=self.analyze).pack(
                 side="left"
             )
-            self.rename_button = ttk.Button(
+            self.move_button = ttk.Button(
                 buttons,
-                text="Rename File",
-                command=self.rename,
+                text="Sortir & Pindahkan",
+                command=self.move,
                 state="disabled",
             )
-            self.rename_button.pack(side="left", padx=8)
+            self.move_button.pack(side="left", padx=8)
 
-            ttk.Label(outer, textvariable=self.summary_var, wraplength=780).grid(
-                row=6, column=0, columnspan=3, sticky="w", pady=(0, 8)
+            ttk.Label(outer, textvariable=self.summary_var, wraplength=920).grid(
+                row=8, column=0, columnspan=3, sticky="w", pady=(0, 8)
             )
 
             table_frame = ttk.Frame(outer)
-            table_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+            table_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
             table_frame.columnconfigure(0, weight=1)
             table_frame.rowconfigure(0, weight=1)
 
-            columns = ("side", "old", "new", "status")
+            columns = ("side", "format", "old", "destination", "status")
             self.table = ttk.Treeview(table_frame, columns=columns, show="headings")
             headings = {
                 "side": "Sisi",
-                "old": "Nama Lama",
-                "new": "Nama Baru",
+                "format": "Format",
+                "old": "Nama Sumber",
+                "destination": "Folder / Nama Tujuan",
                 "status": "Status",
             }
-            widths = {"side": 75, "old": 210, "new": 210, "status": 300}
+            widths = {
+                "side": 80,
+                "format": 70,
+                "old": 190,
+                "destination": 270,
+                "status": 330,
+            }
             for column in columns:
                 self.table.heading(column, text=headings[column])
                 self.table.column(column, width=widths[column], anchor="w")
@@ -398,7 +461,7 @@ def run_gui() -> int:
             scrollbar.grid(row=0, column=1, sticky="ns")
 
             ttk.Label(outer, text=COPYRIGHT).grid(
-                row=8, column=0, columnspan=3, sticky="e", pady=(10, 0)
+                row=10, column=0, columnspan=3, sticky="e", pady=(10, 0)
             )
 
         def _folder_row(
@@ -424,70 +487,85 @@ def run_gui() -> int:
             if selected:
                 variable.set(selected)
                 self.analysis = None
-                self.rename_button.configure(state="disabled")
+                self.move_button.configure(state="disabled")
 
         def analyze(self) -> None:
-            if not self.recto_var.get().strip() or not self.verso_var.get().strip():
+            paths = (
+                self.recto_var.get().strip(),
+                self.verso_var.get().strip(),
+                self.identity_var.get().strip(),
+                self.output_var.get().strip(),
+            )
+            if not all(paths):
                 messagebox.showwarning(
-                    "Folder belum lengkap", "Pilih folder RECTO dan VERSO terlebih dahulu."
+                    "Folder belum lengkap",
+                    "Pilih folder RECTO, VERSO, IDENTITY, dan HASIL terlebih dahulu.",
                 )
                 return
             try:
                 self.analysis = analyze(
-                    Path(self.recto_var.get().strip()),
-                    Path(self.verso_var.get().strip()),
+                    Path(paths[0]),
+                    Path(paths[1]),
+                    Path(paths[2]),
+                    Path(paths[3]),
                     recursive=self.recursive_var.get(),
                     all_files=self.all_files_var.get(),
                     separator=self.separator_var.get(),
                 )
             except Exception as exc:
                 self.analysis = None
-                self.rename_button.configure(state="disabled")
+                self.move_button.configure(state="disabled")
                 messagebox.showerror("Analisis gagal", str(exc))
                 return
 
             for row in self.table.get_children():
                 self.table.delete(row)
             for item in self.analysis.items:
+                relative_destination = item.destination.relative_to(
+                    self.analysis.output_root
+                )
                 self.table.insert(
                     "",
                     "end",
                     values=(
                         item.side,
+                        item.file_type,
                         item.source.name,
-                        item.destination.name if item.destination else "-",
+                        os.fspath(relative_destination),
                         _status_text(item),
                     ),
                 )
 
             self.summary_var.set(
-                f"{self.analysis.ready_count} siap di-rename • "
-                f"{self.analysis.already_count} sudah sesuai • "
+                f"{self.analysis.ready_count} siap dipindahkan • "
+                f"{self.analysis.output_folder_count} folder hasil • "
                 f"{self.analysis.conflict_count} konflik (akan dilewati) • "
-                f"{self.analysis.unpaired_count} tanpa pasangan • "
+                f"{self.analysis.unpaired_count} RECTO/VERSO tanpa pasangan • "
                 f"{self.analysis.ignored_count} file nonfoto diabaikan"
             )
-            self.rename_button.configure(
+            self.move_button.configure(
                 state="normal" if self.analysis.ready_count else "disabled"
             )
 
-        def rename(self) -> None:
+        def move(self) -> None:
             if self.analysis is None or not self.analysis.ready_count:
                 return
             if not messagebox.askyesno(
-                "Konfirmasi rename",
-                f"Rename {self.analysis.ready_count} file sesuai pratinjau?\n\n"
-                "File berstatus konflik atau sudah sesuai tidak akan diubah.",
+                "Konfirmasi pemindahan",
+                f"Pindahkan {self.analysis.ready_count} file ke "
+                f"{self.analysis.output_folder_count} folder hasil?\n\n"
+                "RECTO diberi akhiran r, VERSO diberi akhiran v, dan nama "
+                "IDENTITY tetap. File konflik tidak akan dipindahkan.",
             ):
                 return
             try:
                 completed = execute(self.analysis)
             except Exception as exc:
-                messagebox.showerror("Rename gagal", str(exc))
+                messagebox.showerror("Pemindahan gagal", str(exc))
                 return
 
             messagebox.showinfo(
-                "Selesai", f"Berhasil me-rename {len(completed)} file."
+                "Selesai", f"Berhasil menyortir dan memindahkan {len(completed)} file."
             )
             self.analyze()
 
@@ -496,7 +574,7 @@ def run_gui() -> int:
     except tk.TclError as exc:
         print(f"Antarmuka grafis tidak dapat dibuka: {exc}", file=sys.stderr)
         return 2
-    RenameApp(root)
+    SortPhotoApp(root)
     root.mainloop()
     return 0
 
@@ -505,8 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rename_recto_verso.py",
         description=(
-            "Tambahkan r pada nama foto di folder RECTO dan v pada nama foto "
-            "di folder VERSO. Tanpa argumen, aplikasi grafis akan dibuka."
+            "Sortir dan pindahkan foto RECTO, VERSO, dan IDENTITY berdasarkan "
+            "format. RECTO diberi r, VERSO diberi v, dan nama IDENTITY tetap. "
+            "Tanpa argumen, aplikasi grafis akan dibuka."
         ),
         epilog=COPYRIGHT,
     )
@@ -515,8 +594,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {VERSION}\n{COPYRIGHT}",
     )
-    parser.add_argument("--recto", type=Path, help="Path folder RECTO")
-    parser.add_argument("--verso", type=Path, help="Path folder VERSO")
+    parser.add_argument("--recto", type=Path, help="Path folder sumber RECTO")
+    parser.add_argument("--verso", type=Path, help="Path folder sumber VERSO")
+    parser.add_argument("--identity", type=Path, help="Path folder sumber IDENTITY")
+    parser.add_argument("--output", type=Path, help="Path folder hasil")
     parser.add_argument(
         "--separator",
         default="",
@@ -533,11 +614,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Terapkan rename; tanpa opsi ini hanya menampilkan pratinjau",
+        help="Pindahkan file; tanpa opsi ini hanya menampilkan pratinjau",
     )
-    parser.add_argument(
-        "--gui", action="store_true", help="Buka antarmuka grafis"
-    )
+    parser.add_argument("--gui", action="store_true", help="Buka antarmuka grafis")
     return parser
 
 
@@ -545,15 +624,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.gui or (args.recto is None and args.verso is None):
+    folder_args = (args.recto, args.verso, args.identity, args.output)
+    if args.gui or all(value is None for value in folder_args):
         return run_gui()
-    if args.recto is None or args.verso is None:
-        parser.error("--recto dan --verso harus diberikan bersama-sama")
+    if any(value is None for value in folder_args):
+        parser.error("--recto, --verso, --identity, dan --output harus diberikan bersama")
 
     try:
         result = analyze(
             args.recto,
             args.verso,
+            args.identity,
+            args.output,
             recursive=args.recursive,
             all_files=args.all_files,
             separator=args.separator,
@@ -561,9 +643,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_analysis(result)
         if args.apply:
             completed = execute(result)
-            print(f"\nSelesai: {len(completed)} file berhasil di-rename.")
+            print(f"\nSelesai: {len(completed)} file berhasil dipindahkan.")
         else:
-            print("\nMode pratinjau: belum ada file yang diubah. Tambahkan --apply untuk menerapkan.")
+            print(
+                "\nMode pratinjau: belum ada file yang dipindahkan. "
+                "Tambahkan --apply untuk menerapkan."
+            )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
